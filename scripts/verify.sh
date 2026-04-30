@@ -103,11 +103,28 @@ if [ -n "$RESP" ]; then
     NODE_B_KEY=$(echo "$RESP" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
+our_key = data.get('our_public_key', '')
 peers = data.get('peers', {})
-for key in peers:
-    if key != data.get('our_public_key', ''):
-        print(key)
-        break
+# peers is a dict: {public_key_string: {peer_info...}} OR a list
+if isinstance(peers, dict):
+    for k, v in peers.items():
+        # key might be the pubkey directly, or pubkey is inside the value
+        if isinstance(v, dict) and 'public_key' in v:
+            candidate = v['public_key']
+        else:
+            candidate = k
+        if candidate and candidate != our_key:
+            print(candidate)
+            break
+elif isinstance(peers, list):
+    for p in peers:
+        if isinstance(p, dict):
+            candidate = p.get('public_key', '')
+        else:
+            candidate = str(p)
+        if candidate and candidate != our_key:
+            print(candidate)
+            break
 " 2>/dev/null || echo "")
     echo "     Our key: $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('our_public_key','?'))" 2>/dev/null)"
     if [ -n "$NODE_B_KEY" ]; then
