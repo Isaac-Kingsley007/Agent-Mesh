@@ -5,7 +5,7 @@
   ],
   "Listen": [],
   "api_port": 9012,
-  "tcp_port": 7001,
+  "tcp_port": 7000,
   "router_addr": "http://127.0.0.1",
   "router_port": 9003
 }
