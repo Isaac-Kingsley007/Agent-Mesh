@@ -14,9 +14,16 @@ Routing chain:
 """
 
 import json
+import os
 import re
 import logging
 from flask import Flask, request, jsonify
+from x402.http import FacilitatorConfig, HTTPFacilitatorClientSync, PaymentOption
+from x402.http.middleware.flask import payment_middleware
+from x402.http.types import RouteConfig
+from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.schemas import Network
+from x402.server import x402ResourceServerSync
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -31,6 +38,38 @@ logger = logging.getLogger("agent-b")
 # Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+
+# ---------------------------------------------------------------------------
+# x402 payment middleware — protects POST /mcp with $0.001 USDC per call
+# ---------------------------------------------------------------------------
+EVM_NETWORK: Network = "eip155:84532"  # Base Sepolia testnet
+FACILITATOR_URL = "https://x402.org/facilitator"  # testnet facilitator
+
+_pay_to = os.environ.get("AGENT_B_WALLET_ADDRESS")
+if not _pay_to:
+    raise RuntimeError("AGENT_B_WALLET_ADDRESS env var is required")
+
+logger.info(f"x402 pay-to address: {_pay_to}")
+
+_facilitator = HTTPFacilitatorClientSync(FacilitatorConfig(url=FACILITATOR_URL))
+_resource_server = x402ResourceServerSync(_facilitator)
+_resource_server.register(EVM_NETWORK, ExactEvmServerScheme())
+
+_routes = {
+    "POST /mcp": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact",
+            pay_to=_pay_to,
+            price="$0.001",
+            network=EVM_NETWORK,
+        )],
+        mime_type="application/json",
+        description="AgentMesh MCP tool access — pay-per-call via KeeperHub x402",
+    )
+}
+
+payment_middleware(app, routes=_routes, server=_resource_server)
+# GET /health stays unprotected — it is NOT in _routes
 
 # ---------------------------------------------------------------------------
 # Tool definitions (MCP schema)
