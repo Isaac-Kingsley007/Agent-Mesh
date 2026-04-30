@@ -7,6 +7,17 @@
 # ============================================================================
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Validate required environment variables
+# ---------------------------------------------------------------------------
+if [ -z "${AGENT_B_WALLET_ADDRESS:-}" ]; then
+    echo "ERROR: AGENT_B_WALLET_ADDRESS is not set"
+    echo "  This is your KeeperHub creator wallet address (payTo for x402)"
+    echo "  Get it from: https://app.keeperhub.com → your wallet address"
+    echo "  Then run:  export AGENT_B_WALLET_ADDRESS=0x..."
+    exit 1
+fi
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AXL_DIR="$PROJECT_ROOT/axl"
 AGENT_B_DIR="$PROJECT_ROOT/agents/agent-b"
@@ -18,6 +29,8 @@ SERVICE_NAME="agentmesh"
 echo "============================================"
 echo "  AgentMesh — Starting Agent B"
 echo "============================================"
+echo ""
+echo "  x402 pay-to wallet: $AGENT_B_WALLET_ADDRESS"
 
 # ---------------------------------------------------------------------------
 # 1. Start Agent B Flask MCP server

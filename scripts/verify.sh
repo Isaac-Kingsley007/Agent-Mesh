@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# verify.sh — End-to-end verification for Phase 2
+# verify.sh — End-to-end verification for Phase 2 + Phase 3 (x402 payments)
 #
-# Checks: Flask server, MCP router, cross-mesh tool discovery + tool calls
+# Checks: Flask server, MCP router, cross-mesh tool discovery + tool calls,
+#         x402 payment gate, and autonomous agent-to-agent paid calls
 # Usage: bash scripts/verify.sh
 # ============================================================================
 set -euo pipefail
@@ -103,28 +104,11 @@ if [ -n "$RESP" ]; then
     NODE_B_KEY=$(echo "$RESP" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-our_key = data.get('our_public_key', '')
 peers = data.get('peers', {})
-# peers is a dict: {public_key_string: {peer_info...}} OR a list
-if isinstance(peers, dict):
-    for k, v in peers.items():
-        # key might be the pubkey directly, or pubkey is inside the value
-        if isinstance(v, dict) and 'public_key' in v:
-            candidate = v['public_key']
-        else:
-            candidate = k
-        if candidate and candidate != our_key:
-            print(candidate)
-            break
-elif isinstance(peers, list):
-    for p in peers:
-        if isinstance(p, dict):
-            candidate = p.get('public_key', '')
-        else:
-            candidate = str(p)
-        if candidate and candidate != our_key:
-            print(candidate)
-            break
+for key in peers:
+    if key != data.get('our_public_key', ''):
+        print(key)
+        break
 " 2>/dev/null || echo "")
     echo "     Our key: $(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('our_public_key','?'))" 2>/dev/null)"
     if [ -n "$NODE_B_KEY" ]; then
@@ -189,6 +173,64 @@ else
     echo "  ⊘ Skipped (no Node B key)"
 fi
 
+# ===========================================================================
+# Phase 3 — x402 Payment Gate
+# ===========================================================================
+echo ""
+echo "============================================"
+echo "  Phase 3 — x402 Payment Gate"
+echo "============================================"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Step 11: POST /mcp without payment should return HTTP 402
+# ---------------------------------------------------------------------------
+echo "[11] POST /mcp without payment should return 402..."
+RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST $AGENT_B/mcp \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}' 2>/dev/null || echo "000")
+if [ "$RESP" = "402" ]; then
+    echo "  ✓ Correctly returns 402 Payment Required"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ Expected 402 but got $RESP (is AGENT_B_WALLET_ADDRESS set?)"
+    FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# Step 12: GET /health should still return 200 (unprotected)
+# ---------------------------------------------------------------------------
+echo ""
+echo "[12] GET /health should still return 200 (unprotected)..."
+RESP=$(curl -s -o /dev/null -w "%{http_code}" $AGENT_B/health 2>/dev/null || echo "000")
+if [ "$RESP" = "200" ]; then
+    echo "  ✓ /health is unprotected (200)"
+    PASS=$((PASS + 1))
+else
+    echo "  ✗ /health returned $RESP — should be 200"
+    FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# Step 13: Agent A paid call (requires AGENT_A_EVM_PRIVATE_KEY)
+# ---------------------------------------------------------------------------
+echo ""
+echo "[13] Agent A paid call (requires AGENT_A_EVM_PRIVATE_KEY)..."
+if [ -z "${AGENT_A_EVM_PRIVATE_KEY:-}" ]; then
+    echo "  ⊘ Skipped (AGENT_A_EVM_PRIVATE_KEY not set)"
+else
+    PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+    AGENT_A_RESULT=$(python3 "$PROJECT_ROOT/agents/agent-a/agent.py" 2>&1 | tail -5)
+    if echo "$AGENT_A_RESULT" | grep -q "completed all paid calls"; then
+        echo "  ✓ Agent A completed paid calls successfully"
+        PASS=$((PASS + 1))
+    else
+        echo "  ✗ Agent A failed"
+        echo "     $AGENT_A_RESULT"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
@@ -197,6 +239,12 @@ echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
 echo "============================================"
 
+echo ""
+echo "============================================"
+echo "  Final Results: $PASS passed, $FAIL failed"
+echo "============================================"
+
 if [ $FAIL -gt 0 ]; then
     exit 1
 fi
+
