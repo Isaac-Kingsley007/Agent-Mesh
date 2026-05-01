@@ -1,0 +1,10 @@
+# Install dependencies
+pip install "x402[flask]" "x402[requests]" eth-account requests
+
+# Terminal 3 — Agent B
+export AGENT_B_WALLET_ADDRESS="0xYourAddress"
+bash scripts/start-agent-b.sh
+
+# Terminal 4 — Agent A
+export AGENT_A_EVM_PRIVATE_KEY="0xYourPrivateKey"
+python3 agents/agent-a/agent.py
