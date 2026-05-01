@@ -17,6 +17,11 @@ import json
 import os
 import re
 import logging
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from flask import Flask, request, jsonify
 from x402.http import FacilitatorConfig, HTTPFacilitatorClientSync, PaymentOption
 from x402.http.middleware.flask import payment_middleware

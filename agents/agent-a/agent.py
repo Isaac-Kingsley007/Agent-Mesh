@@ -14,6 +14,12 @@ Run:
 import os
 import sys
 import json
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 import requests as std_requests
 from eth_account import Account
 from x402 import x402ClientSync

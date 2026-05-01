@@ -8,6 +8,31 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Resolve project root early (needed for .venv and .env paths)
+# ---------------------------------------------------------------------------
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Load .env file if present
+# ---------------------------------------------------------------------------
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    echo "Loading environment from $PROJECT_ROOT/.env"
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
+# ---------------------------------------------------------------------------
+# Activate the Python virtual environment
+# ---------------------------------------------------------------------------
+if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
+    echo "Activating virtual environment at $PROJECT_ROOT/.venv"
+    source "$PROJECT_ROOT/.venv/bin/activate"
+else
+    echo "WARNING: .venv not found at $PROJECT_ROOT/.venv — using system Python"
+fi
+
+# ---------------------------------------------------------------------------
 # Validate required environment variables
 # ---------------------------------------------------------------------------
 if [ -z "${AGENT_B_WALLET_ADDRESS:-}" ]; then
@@ -18,7 +43,6 @@ if [ -z "${AGENT_B_WALLET_ADDRESS:-}" ]; then
     exit 1
 fi
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AXL_DIR="$PROJECT_ROOT/axl"
 AGENT_B_DIR="$PROJECT_ROOT/agents/agent-b"
 
