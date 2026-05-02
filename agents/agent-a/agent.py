@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Agent A — Autonomous buyer agent for AgentMesh (Gemini-powered agentic loop).
-Pays Agent B via x402 (KeeperHub ecosystem) through the AXL mesh.
+Agent A — Autonomous agent for AgentMesh (Gemini-powered agentic loop).
+Discovers and hires tools from ALL peers on the mesh, paying via x402.
 
 x402 payment is tunneled through the JSON-RPC body because the AXL mesh
 transports only JSON envelopes over TCP (no HTTP headers/status codes).
-The MCP Router on Node B extracts payment signatures from the body and
-injects them as HTTP headers before forwarding to Agent B's Flask server.
 
 Setup:
   export AGENT_A_EVM_PRIVATE_KEY="0x..."   # wallet with USDC on Base Sepolia
@@ -14,7 +12,7 @@ Setup:
 
 Run:
   python3 agents/agent-a/agent.py
-  python3 agents/agent-a/agent.py "Analyze this text for sentiment and keywords: ..."
+  python3 agents/agent-a/agent.py "Analyze this text and review this code: ..."
 """
 
 import os
@@ -47,80 +45,72 @@ if not GEMINI_API_KEY:
     print("ERROR: GEMINI_API_KEY is not set")
     sys.exit(1)
 
-# ── 2. Set up x402 payment client (KeeperHub agentic wallet ecosystem) ───
+# ── 2. Set up x402 payment client ────────────────────────────────────────
 account = Account.from_key(PRIVATE_KEY)
 signer = EthAccountSigner(account)
 x402_client = x402ClientSync()
 register_exact_evm_client(x402_client, signer)
-
-# Wrap in HTTP client for header parsing/encoding
 x402_http = x402HTTPClientSync(x402_client)
 
 # ── 3. Set up Gemini client ──────────────────────────────────────────────
 GEMINI_MODEL = "gemini-3-flash-preview"
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+AXL_API = "http://127.0.0.1:9002"
+
 print("=" * 60)
-print("  AgentMesh — Agent A (Autonomous Buyer, Gemini-Powered)")
+print("  AgentMesh — Agent A (Autonomous, Gemini-Powered)")
 print("=" * 60)
-print(f"  Agent A wallet:  {account.address}")
-print(f"  Payment method:  x402 on Base Sepolia (KeeperHub ecosystem)")
-print(f"  LLM engine:      {GEMINI_MODEL}")
-print(f"  Price per call:  $0.001 USDC")
+print(f"  Wallet:    {account.address}")
+print(f"  LLM:       {GEMINI_MODEL}")
+print(f"  AXL Node:  {AXL_API}")
 print()
 
-# ── 4. Discover Node B's public key from Node A's topology ───────────────
-print("Discovering Node B via AXL topology...")
+# ── 4. Discover all peers ────────────────────────────────────────────────
+print("Discovering peers via AXL topology...")
 try:
-    topology = std_requests.get("http://127.0.0.1:9002/topology", timeout=5).json()
+    topology = std_requests.get(f"{AXL_API}/topology", timeout=5).json()
 except Exception as e:
-    print(f"ERROR: Cannot reach AXL Node A at port 9002: {e}")
-    print("  Make sure Node A is running: cd axl && ./node -config node-config.json")
+    print(f"ERROR: Cannot reach AXL Node A at {AXL_API}: {e}")
     sys.exit(1)
 
 our_key = topology.get("our_public_key", "")
 peers = topology.get("peers", {})
 
-node_b_key = None
+peer_keys = []
 if isinstance(peers, dict):
     for k, v in peers.items():
         candidate = v.get("public_key", k) if isinstance(v, dict) else k
         if candidate and candidate != our_key:
-            node_b_key = candidate
-            break
+            peer_keys.append(candidate)
 elif isinstance(peers, list):
     for p in peers:
         candidate = p.get("public_key", "") if isinstance(p, dict) else str(p)
         if candidate and candidate != our_key:
-            node_b_key = candidate
-            break
+            peer_keys.append(candidate)
 
-if not node_b_key:
-    print("ERROR: Node B not found in topology")
-    print("  Make sure Node B is running: cd axl && ./node -config node-config-2.json")
+if not peer_keys:
+    print("ERROR: No peers found in topology")
     sys.exit(1)
 
-MESH_URL = f"http://127.0.0.1:9002/mcp/{node_b_key}/agentmesh"
-print(f"  Node B key:  {node_b_key[:16]}...")
-print(f"  Mesh URL:    {MESH_URL}")
+print(f"  Found {len(peer_keys)} peer(s)")
+for pk in peer_keys:
+    print(f"    • {pk[:16]}...")
 print()
 
-# ── 5. x402 tunneled payment helper ──────────────────────────────────────
+# ── 5. Known service names per peer type ─────────────────────────────────
+# We try these service names on each peer to discover available tools
+SERVICE_NAMES = ["agentmesh", "agent-a", "agent-c"]
+
+# ── 6. x402 tunneled payment helper ──────────────────────────────────────
 
 _call_counter = 0
+# Maps tool_name → (peer_key, service_name) for routing
+_tool_routing = {}
 
-def paid_mcp_call(method, params, label):
-    """Make an MCP call through the AXL mesh with x402 payment tunneling.
 
-    Returns the parsed JSON-RPC result dict, or None on failure.
-
-    Flow:
-      1. Send JSON-RPC request through mesh
-      2. If response contains _x402_challenge → payment required
-      3. Create payment payload, embed in body as _x402_payment
-      4. Retry through mesh — MCP Router extracts it as HTTP header
-      5. Agent B's x402 middleware verifies and processes the request
-    """
+def paid_mcp_call(mesh_url, method, params, label):
+    """Make an MCP call through the AXL mesh with x402 payment tunneling."""
     global _call_counter
     _call_counter += 1
     call_id = _call_counter
@@ -130,7 +120,7 @@ def paid_mcp_call(method, params, label):
 
     try:
         resp = std_requests.post(
-            MESH_URL,
+            mesh_url,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30,
@@ -148,24 +138,21 @@ def paid_mcp_call(method, params, label):
 
     result = resp.json()
 
-    # ── Check for x402 payment challenge tunneled through the mesh ──
+    # ── x402 payment challenge handling ──
     if isinstance(result, dict) and "_x402_challenge" in result:
         challenge = result["_x402_challenge"]
-        print(f"  x402 challenge:   Payment required (status {challenge.get('status', '?')})")
+        print(f"  x402 challenge:   Payment required")
 
-        # Parse payment requirements from the tunneled 402 response
         challenge_headers = challenge.get("headers", {})
         challenge_body = challenge.get("body", {})
 
         def get_header(name):
-            """Case-insensitive header lookup from tunneled headers."""
             for k, v in challenge_headers.items():
                 if k.lower() == name.lower():
                     return v
             return None
 
         try:
-            # Use x402 client to parse payment requirements and create payload
             payment_required = x402_http.get_payment_required_response(
                 get_header, challenge_body
             )
@@ -174,26 +161,20 @@ def paid_mcp_call(method, params, label):
 
             if not payment_headers:
                 print(f"  ERROR: No payment signature created")
-                print()
                 return None
-
-            # Tunnel the full header dict so the MCP Router knows the
-            # correct header name (PAYMENT-SIGNATURE for V2, X-PAYMENT for V1)
-            payment_tunnel = payment_headers
 
             print(f"  Payment signed:   ✓ (tunneling through mesh)")
 
-            # Retry with payment headers embedded in the JSON body
             retry_payload = {
                 "jsonrpc": "2.0",
                 "method": method,
                 "id": call_id,
                 "params": params,
-                "_x402_payment": payment_tunnel,
+                "_x402_payment": payment_headers,
             }
 
             resp2 = std_requests.post(
-                MESH_URL,
+                mesh_url,
                 json=retry_payload,
                 headers={"Content-Type": "application/json"},
                 timeout=30,
@@ -201,22 +182,16 @@ def paid_mcp_call(method, params, label):
 
             if resp2.status_code != 200:
                 print(f"  ERROR: Retry failed with status {resp2.status_code}")
-                print(f"  Body: {resp2.text[:200]}")
-                print()
                 return None
 
             result = resp2.json()
             print(f"  Payment settled:  ✓ USDC paid via x402")
 
-            # Check for payment receipt tunneled back
             if isinstance(result, dict) and "_x402_receipt" in result:
                 receipt_raw = result.pop("_x402_receipt")
                 try:
                     receipt_data = json.loads(receipt_raw) if isinstance(receipt_raw, str) else receipt_raw
-                    tx = (
-                        receipt_data.get("transaction")
-                        or receipt_data.get("txHash", "")
-                    )
+                    tx = receipt_data.get("transaction") or receipt_data.get("txHash", "")
                     if tx:
                         print(f"  Tx hash:          {str(tx)[:20]}...")
                 except Exception:
@@ -226,16 +201,13 @@ def paid_mcp_call(method, params, label):
             print(f"  ERROR: Payment handling failed: {e}")
             import traceback
             traceback.print_exc()
-            print()
             return None
 
-    # ── Check for another x402 challenge (payment rejected on retry) ──
     if isinstance(result, dict) and "_x402_challenge" in result:
-        print(f"  ERROR: Payment was not accepted (still getting 402)")
-        print()
+        print(f"  ERROR: Payment was not accepted")
         return None
 
-    # ── Return result ──
+    # ── Extract and display result ──
     if isinstance(result, dict):
         content = result.get("result", {})
         if method == "tools/list":
@@ -252,8 +224,6 @@ def paid_mcp_call(method, params, label):
                     print(f"  Tool result:      {tool_result[:120]}")
         elif "error" in result:
             print(f"  JSON-RPC error:   {result['error']}")
-        else:
-            print(f"  Response:         {json.dumps(result, indent=None)[:120]}")
         print()
         return content
     else:
@@ -262,25 +232,41 @@ def paid_mcp_call(method, params, label):
         return None
 
 
-# ── 6. Discover tools and build Gemini function declarations ─────────────
+# ── 7. Discover tools from all peers and services ────────────────────────
 
 print("=" * 60)
-print("  Phase 1: Discovering Agent B's tools")
+print("  Phase 1: Discovering tools from all peers")
 print("=" * 60)
 print()
 
-tools_result = paid_mcp_call("tools/list", {}, "Discover available tools")
-if not tools_result or "tools" not in tools_result:
-    print("ERROR: Could not discover tools from Agent B")
+all_mcp_tools = []
+
+for peer_key in peer_keys:
+    for service_name in SERVICE_NAMES:
+        mesh_url = f"{AXL_API}/mcp/{peer_key}/{service_name}"
+        print(f"  Probing {peer_key[:12]}.../{service_name}")
+
+        tools_result = paid_mcp_call(
+            mesh_url, "tools/list", {},
+            f"Discover {service_name}@{peer_key[:8]}",
+        )
+
+        if tools_result and "tools" in tools_result:
+            for tool in tools_result["tools"]:
+                tool_name = tool["name"]
+                if tool_name not in _tool_routing:
+                    _tool_routing[tool_name] = (peer_key, service_name)
+                    all_mcp_tools.append(tool)
+                    print(f"    ✓ Registered: {tool_name}")
+
+if not all_mcp_tools:
+    print("ERROR: No tools discovered from any peer")
     sys.exit(1)
 
-mcp_tools = tools_result["tools"]
-
-# Convert MCP tool schemas → Gemini FunctionDeclaration objects
+# ── Build Gemini function declarations ──
 gemini_function_decls = []
-for tool in mcp_tools:
+for tool in all_mcp_tools:
     schema = tool.get("inputSchema", {})
-    # Build a clean JSON schema for Gemini parameters
     params_schema = {
         "type": schema.get("type", "object"),
         "properties": {},
@@ -302,35 +288,33 @@ for tool in mcp_tools:
 
 gemini_tools = [types.Tool(function_declarations=gemini_function_decls)]
 
-print(f"  Registered {len(gemini_function_decls)} tools with Gemini:")
+print()
+print(f"  Total tools discovered: {len(gemini_function_decls)}")
 for d in gemini_function_decls:
-    print(f"    • {d.name}")
+    peer_key, svc = _tool_routing[d.name]
+    print(f"    • {d.name} → {svc}@{peer_key[:12]}...")
 print()
 
 
-# ── 7. Agentic loop ─────────────────────────────────────────────────────
+# ── 8. Agentic loop ─────────────────────────────────────────────────────
 
 DEFAULT_GOAL = (
-    "Analyze the following text for me — give me a summary, sentiment analysis, "
-    "and extract the key keywords. Here is the text: "
-    "'Autonomous agents are transforming software. They can now reason, plan, "
-    "and pay for services without human intervention. KeeperHub provides the "
-    "execution layer that guarantees transactions land onchain despite gas spikes "
-    "and network congestion. x402 is the payment protocol that makes "
-    "agent-to-agent commerce possible. The future of AI is autonomous, "
-    "trustless, and decentralized.'"
+    "I need you to do a comprehensive analysis. First, summarize this text and extract keywords: "
+    "'Autonomous agents are transforming software. They can reason, plan, and pay for services "
+    "without human intervention. KeeperHub provides the execution layer for onchain transactions. "
+    "x402 is the payment protocol for agent-to-agent commerce.' "
+    "Then analyze the sentiment. Finally, rewrite the text in a casual style."
 )
 
-# Accept goal from CLI or use default
 user_goal = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else DEFAULT_GOAL
 
 SYSTEM_INSTRUCTION = (
     "You are Agent A, an autonomous AI agent in the AgentMesh network. "
-    "You have access to paid tools served by Agent B over the mesh. "
+    "You have access to paid tools from multiple agents on the mesh. "
     "Use the available tools to accomplish the user's goal. "
-    "You can call multiple tools as needed. "
+    "You can call multiple tools as needed — each call costs $0.001 USDC. "
     "When you have gathered enough information, synthesize a final answer. "
-    "Be concise but thorough in your final response."
+    "Be concise but thorough."
 )
 
 MAX_ITERATIONS = 10
@@ -339,10 +323,8 @@ print("=" * 60)
 print("  Phase 2: Agentic Loop (Gemini-Powered)")
 print("=" * 60)
 print(f"  Goal: {user_goal[:80]}{'...' if len(user_goal) > 80 else ''}")
-print(f"  Max iterations: {MAX_ITERATIONS}")
 print()
 
-# Build initial conversation
 conversation = [
     types.Content(role="user", parts=[types.Part.from_text(text=user_goal)])
 ]
@@ -350,7 +332,6 @@ conversation = [
 for iteration in range(1, MAX_ITERATIONS + 1):
     print(f"─── Iteration {iteration}/{MAX_ITERATIONS} ─────────────────────────────────")
 
-    # Call Gemini with tools (manual function calling — no automatic FC)
     try:
         response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
@@ -368,29 +349,38 @@ for iteration in range(1, MAX_ITERATIONS + 1):
         print(f"  ERROR: Gemini call failed: {e}")
         break
 
-    # Check if Gemini wants to call functions
     function_calls = response.function_calls
     if function_calls:
         print(f"  Gemini requested {len(function_calls)} tool call(s)")
-
-        # Add Gemini's response (with function_call parts) to conversation
         conversation.append(response.candidates[0].content)
 
-        # Execute each function call as a paid MCP call
         function_response_parts = []
         for fc in function_calls:
             tool_name = fc.name
             tool_args = dict(fc.args) if fc.args else {}
-            print(f"  → Calling tool: {tool_name}({json.dumps(tool_args)[:80]})")
+            print(f"  → Calling tool: {tool_name}")
 
-            # Make the paid MCP call through the mesh
+            # Route to correct peer/service
+            if tool_name in _tool_routing:
+                peer_key, service_name = _tool_routing[tool_name]
+                mesh_url = f"{AXL_API}/mcp/{peer_key}/{service_name}"
+            else:
+                print(f"    WARNING: Unknown tool routing for {tool_name}")
+                function_response_parts.append(
+                    types.Part.from_function_response(
+                        name=tool_name,
+                        response={"result": {"error": f"No route for tool {tool_name}"}},
+                    )
+                )
+                continue
+
             mcp_result = paid_mcp_call(
+                mesh_url,
                 "tools/call",
                 {"name": tool_name, "arguments": tool_args},
                 f"Gemini→{tool_name}",
             )
 
-            # Extract the text result from MCP response
             if mcp_result:
                 tool_content = mcp_result.get("content", [{}])
                 result_text = tool_content[0].get("text", "{}") if tool_content else "{}"
@@ -401,7 +391,6 @@ for iteration in range(1, MAX_ITERATIONS + 1):
             else:
                 result_data = {"error": "Tool call failed"}
 
-            # Build function response part for Gemini
             function_response_parts.append(
                 types.Part.from_function_response(
                     name=tool_name,
@@ -409,13 +398,11 @@ for iteration in range(1, MAX_ITERATIONS + 1):
                 )
             )
 
-        # Add function responses to conversation
         conversation.append(
             types.Content(role="tool", parts=function_response_parts)
         )
 
     else:
-        # Gemini returned a text answer — we're done
         final_text = response.text or "(no text in response)"
         print(f"  Gemini produced final answer")
         print()
@@ -428,12 +415,11 @@ for iteration in range(1, MAX_ITERATIONS + 1):
         break
 else:
     print(f"  WARNING: Reached max iterations ({MAX_ITERATIONS})")
-    # Try to get whatever Gemini last said
     if response and response.text:
         print(response.text)
 
 print("=" * 60)
 print(f"  ✓ Agent A completed — {_call_counter} paid MCP calls made")
-print("  All payments settled on Base Sepolia via KeeperHub ecosystem")
-print("  All communication routed through AXL P2P mesh")
+print("  Payments settled on Base Sepolia via KeeperHub x402")
+print("  Communication routed through AXL P2P mesh")
 print("=" * 60)
