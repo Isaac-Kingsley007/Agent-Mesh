@@ -113,6 +113,99 @@ TOOLS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "keyword_extract",
+        "description": "Extract the most important keywords and key-phrases from text. Returns ranked keywords with frequency scores.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to extract keywords from",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Number of top keywords to return (default: 10)",
+                    "default": 10,
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "text_translate",
+        "description": "Translate text between languages using a built-in dictionary. Supports English, Spanish, French, and German.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to translate",
+                },
+                "source_lang": {
+                    "type": "string",
+                    "description": "Source language code: en, es, fr, de (default: en)",
+                    "default": "en",
+                },
+                "target_lang": {
+                    "type": "string",
+                    "description": "Target language code: en, es, fr, de",
+                },
+            },
+            "required": ["text", "target_lang"],
+        },
+    },
+    {
+        "name": "word_frequency",
+        "description": "Analyze the word frequency distribution of text. Returns top words, unique count, and statistics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to analyze",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Number of top words to return (default: 15)",
+                    "default": 15,
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "text_similarity",
+        "description": "Compare two texts for similarity using Jaccard similarity. Returns similarity score and shared/unique terms.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text_a": {
+                    "type": "string",
+                    "description": "First text to compare",
+                },
+                "text_b": {
+                    "type": "string",
+                    "description": "Second text to compare",
+                },
+            },
+            "required": ["text_a", "text_b"],
+        },
+    },
+    {
+        "name": "entity_extract",
+        "description": "Extract named entities from text including emails, URLs, dates, phone numbers, and currency amounts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to extract entities from",
+                },
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -204,10 +297,222 @@ def tool_sentiment(arguments: dict) -> dict:
     }
 
 
+# ── Stop words for keyword extraction ──
+STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "as", "into", "through", "during", "before", "after", "above", "below",
+    "between", "out", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "each",
+    "every", "both", "few", "more", "most", "other", "some", "such", "no",
+    "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    "just", "because", "but", "and", "or", "if", "while", "about", "up",
+    "that", "this", "these", "those", "it", "its", "i", "me", "my", "we",
+    "our", "you", "your", "he", "him", "his", "she", "her", "they", "them",
+    "their", "what", "which", "who", "whom", "also", "s", "t", "d", "re",
+}
+
+
+def tool_keyword_extract(arguments: dict) -> dict:
+    """Extract top keywords from text using term frequency with stop-word filtering."""
+    text = arguments.get("text", "")
+    top_n = arguments.get("top_n", 10)
+
+    if not text:
+        return {"error": "No text provided"}
+
+    words = re.findall(r'\b[a-zA-Z]{2,}\b', text.lower())
+    filtered = [w for w in words if w not in STOP_WORDS]
+
+    freq = {}
+    for w in filtered:
+        freq[w] = freq.get(w, 0) + 1
+
+    ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+    return {
+        "keywords": [{"word": w, "count": c, "score": round(c / max(len(filtered), 1), 4)} for w, c in ranked],
+        "total_words": len(words),
+        "unique_keywords": len(freq),
+    }
+
+
+# ── Translation dictionaries ──
+TRANSLATION_DICTS = {
+    ("en", "es"): {
+        "hello": "hola", "world": "mundo", "good": "bueno", "morning": "mañana",
+        "thank": "gracias", "you": "tú", "please": "por favor", "yes": "sí",
+        "no": "no", "the": "el", "is": "es", "are": "son", "i": "yo",
+        "love": "amor", "day": "día", "night": "noche", "water": "agua",
+        "food": "comida", "house": "casa", "book": "libro", "time": "tiempo",
+        "work": "trabajo", "life": "vida", "new": "nuevo", "big": "grande",
+        "small": "pequeño", "happy": "feliz", "sad": "triste", "friend": "amigo",
+        "agent": "agente", "payment": "pago", "network": "red", "autonomous": "autónomo",
+    },
+    ("en", "fr"): {
+        "hello": "bonjour", "world": "monde", "good": "bon", "morning": "matin",
+        "thank": "merci", "you": "vous", "please": "s'il vous plaît", "yes": "oui",
+        "no": "non", "the": "le", "is": "est", "are": "sont", "i": "je",
+        "love": "amour", "day": "jour", "night": "nuit", "water": "eau",
+        "food": "nourriture", "house": "maison", "book": "livre", "time": "temps",
+        "work": "travail", "life": "vie", "new": "nouveau", "big": "grand",
+        "small": "petit", "happy": "heureux", "sad": "triste", "friend": "ami",
+        "agent": "agent", "payment": "paiement", "network": "réseau", "autonomous": "autonome",
+    },
+    ("en", "de"): {
+        "hello": "hallo", "world": "welt", "good": "gut", "morning": "morgen",
+        "thank": "danke", "you": "du", "please": "bitte", "yes": "ja",
+        "no": "nein", "the": "der", "is": "ist", "are": "sind", "i": "ich",
+        "love": "liebe", "day": "tag", "night": "nacht", "water": "wasser",
+        "food": "essen", "house": "haus", "book": "buch", "time": "zeit",
+        "work": "arbeit", "life": "leben", "new": "neu", "big": "groß",
+        "small": "klein", "happy": "glücklich", "sad": "traurig", "friend": "freund",
+        "agent": "agent", "payment": "zahlung", "network": "netzwerk", "autonomous": "autonom",
+    },
+}
+
+
+def tool_text_translate(arguments: dict) -> dict:
+    """Translate text using built-in dictionaries."""
+    text = arguments.get("text", "")
+    source = arguments.get("source_lang", "en").lower()
+    target = arguments.get("target_lang", "").lower()
+
+    if not text:
+        return {"error": "No text provided"}
+    if not target:
+        return {"error": "target_lang is required"}
+    if source == target:
+        return {"translated": text, "source_lang": source, "target_lang": target, "note": "Same language"}
+
+    dictionary = TRANSLATION_DICTS.get((source, target))
+    if not dictionary:
+        # Try reverse
+        rev = TRANSLATION_DICTS.get((target, source))
+        if rev:
+            dictionary = {v: k for k, v in rev.items()}
+        else:
+            return {"error": f"Translation pair {source}→{target} not supported. Supported: en↔es, en↔fr, en↔de"}
+
+    words = re.findall(r'\b\w+\b|\S', text)
+    translated_words = []
+    translated_count = 0
+    for w in words:
+        lower = w.lower()
+        if lower in dictionary:
+            translated_words.append(dictionary[lower])
+            translated_count += 1
+        else:
+            translated_words.append(w)
+
+    return {
+        "translated": " ".join(translated_words),
+        "source_lang": source,
+        "target_lang": target,
+        "words_translated": translated_count,
+        "total_words": len(words),
+    }
+
+
+def tool_word_frequency(arguments: dict) -> dict:
+    """Analyze word frequency distribution of text."""
+    text = arguments.get("text", "")
+    top_n = arguments.get("top_n", 15)
+
+    if not text:
+        return {"error": "No text provided"}
+
+    words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+    total = len(words)
+
+    freq = {}
+    for w in words:
+        freq[w] = freq.get(w, 0) + 1
+
+    ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    top_words = ranked[:top_n]
+
+    return {
+        "top_words": [{"word": w, "count": c, "percentage": round(c / max(total, 1) * 100, 1)} for w, c in top_words],
+        "total_words": total,
+        "unique_words": len(freq),
+        "avg_frequency": round(total / max(len(freq), 1), 2),
+        "hapax_legomena": sum(1 for c in freq.values() if c == 1),
+    }
+
+
+def tool_text_similarity(arguments: dict) -> dict:
+    """Compare two texts using Jaccard similarity."""
+    text_a = arguments.get("text_a", "")
+    text_b = arguments.get("text_b", "")
+
+    if not text_a or not text_b:
+        return {"error": "Both text_a and text_b are required"}
+
+    words_a = set(re.findall(r'\b\w+\b', text_a.lower()))
+    words_b = set(re.findall(r'\b\w+\b', text_b.lower()))
+
+    intersection = words_a & words_b
+    union = words_a | words_b
+    jaccard = round(len(intersection) / max(len(union), 1), 4)
+
+    return {
+        "jaccard_similarity": jaccard,
+        "similarity_percent": round(jaccard * 100, 1),
+        "shared_terms": sorted(list(intersection)),
+        "unique_to_a": sorted(list(words_a - words_b)),
+        "unique_to_b": sorted(list(words_b - words_a)),
+        "terms_in_a": len(words_a),
+        "terms_in_b": len(words_b),
+    }
+
+
+def tool_entity_extract(arguments: dict) -> dict:
+    """Extract entities (emails, URLs, dates, phone numbers, currency) via regex."""
+    text = arguments.get("text", "")
+
+    if not text:
+        return {"error": "No text provided"}
+
+    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+    urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', text)
+    dates = re.findall(
+        r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b'
+        r'|\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b'
+        r'|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b',
+        text, re.IGNORECASE,
+    )
+    phones = re.findall(r'[\+]?[(]?\d{1,4}[)]?[-\s.]?\d{1,4}[-\s.]?\d{1,9}', text)
+    phones = [p for p in phones if len(re.findall(r'\d', p)) >= 7]
+    currency = re.findall(r'[\$€£¥]\s?\d[\d,]*\.?\d*|\d[\d,]*\.?\d*\s?(?:USD|EUR|GBP|USDC|ETH|BTC)', text)
+
+    entities = {
+        "emails": emails,
+        "urls": urls,
+        "dates": dates,
+        "phone_numbers": phones,
+        "currency_amounts": currency,
+    }
+
+    total = sum(len(v) for v in entities.values())
+
+    return {
+        "entities": entities,
+        "total_entities_found": total,
+    }
+
+
 # Tool dispatch table
 TOOL_HANDLERS = {
     "summarize": tool_summarize,
     "sentiment": tool_sentiment,
+    "keyword_extract": tool_keyword_extract,
+    "text_translate": tool_text_translate,
+    "word_frequency": tool_word_frequency,
+    "text_similarity": tool_text_similarity,
+    "entity_extract": tool_entity_extract,
 }
 
 # ---------------------------------------------------------------------------
