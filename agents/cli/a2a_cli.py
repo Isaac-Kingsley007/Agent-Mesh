@@ -2,12 +2,12 @@
 """
 A2A Client CLI — OpenAgents Gensyn Track
 =========================================
-An interactive command-line interface for communicating with A2A agents
-on the AXL mesh network. Handles x402 payments autonomously.
+Interactive CLI for communicating with A2A agents on the AXL mesh.
+Handles x402 payments autonomously.
 
 Setup:
-  export EVM_PRIVATE_KEY="0x..."     # Wallet with USDC on Base Sepolia
-  export AXL_API="http://127.0.0.1:9002"  # Your AXL node (optional, default shown)
+  export EVM_PRIVATE_KEY="0x..."          # Wallet with USDC on Base Sepolia
+  export AXL_API="http://127.0.0.1:9002"  # Your AXL node (optional, this is the default)
 
 Run:
   python3 a2a_cli.py
@@ -19,12 +19,11 @@ import uuid
 import json
 from typing import Optional
 
-# ── Optional: load .env if present ────────────────────────────────────────
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # dotenv not required
+    pass
 
 import requests as std_requests
 from eth_account import Account
@@ -34,7 +33,7 @@ from x402.mechanisms.evm import EthAccountSigner
 from x402.mechanisms.evm.exact.register import register_exact_evm_client
 
 
-# ── ANSI color helpers ─────────────────────────────────────────────────────
+# ── ANSI colors ────────────────────────────────────────────────────────────
 
 class C:
     RESET   = "\033[0m"
@@ -44,8 +43,6 @@ class C:
     GREEN   = "\033[32m"
     YELLOW  = "\033[33m"
     RED     = "\033[31m"
-    MAGENTA = "\033[35m"
-    BLUE    = "\033[34m"
     WHITE   = "\033[97m"
 
 def c(color: str, text: str) -> str:
@@ -66,7 +63,7 @@ def separator(title: str = ""):
         print(c(C.DIM, "─" * 56))
 
 
-# ── Environment & x402 setup ──────────────────────────────────────────────
+# ── x402 setup ────────────────────────────────────────────────────────────
 
 def setup_x402(private_key: str):
     account = Account.from_key(private_key)
@@ -77,22 +74,17 @@ def setup_x402(private_key: str):
     return account, client, http
 
 
-# ── Topology / peer discovery ─────────────────────────────────────────────
+# ── AXL / topology helpers ────────────────────────────────────────────────
 
 def fetch_topology(axl_api: str) -> dict:
-    """
-    GET /topology from the local AXL node.
-    Returns the raw topology dict, or raises on error.
-    """
     resp = std_requests.get(f"{axl_api}/topology", timeout=8)
     resp.raise_for_status()
     return resp.json()
 
 
 def extract_peer_keys(topology: dict) -> list[str]:
-    """Return all peer public keys that are not our own node."""
-    our_key  = topology.get("our_public_key", "")
-    peers    = topology.get("peers", {})
+    our_key = topology.get("our_public_key", "")
+    peers   = topology.get("peers", {})
     keys: list[str] = []
 
     if isinstance(peers, dict):
@@ -105,23 +97,97 @@ def extract_peer_keys(topology: dict) -> list[str]:
             candidate = p.get("public_key", "") if isinstance(p, dict) else str(p)
             if candidate and candidate != our_key:
                 keys.append(candidate)
-
     return keys
 
 
 def fetch_agent_card(axl_api: str, peer_key: str) -> Optional[dict]:
     """
-    Try to fetch the agent card from a peer via the A2A URL.
-    Returns the card dict or None if unavailable.
+    Try to fetch the agent card via the AXL A2A bridge.
+    Tries /.well-known/agent.json first, then the root GET.
     """
-    a2a_url = f"{axl_api}/a2a/{peer_key}"
-    try:
-        resp = std_requests.get(a2a_url, timeout=8)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
+    base_url   = f"{axl_api}/a2a/{peer_key}"
+    candidates = [
+        f"{base_url}/.well-known/agent.json",
+        base_url,
+    ]
+    for url in candidates:
+        try:
+            resp = std_requests.get(url, timeout=8)
+            if resp.status_code == 200 and resp.text.strip():
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict) and "error" not in data:
+                        return data
+                except Exception:
+                    pass
+        except Exception:
+            pass
     return None
+
+
+def probe_a2a(axl_api: str, peer_key: str) -> tuple[bool, str]:
+    """
+    Send a minimal JSON-RPC ping to check if this peer has a reachable A2A server.
+    Returns (reachable: bool, reason: str).
+
+    Key insight: a 502 from the AXL bridge means it couldn't reach the A2A
+    backend (e.g. Agent B which is MCP-only, or a misconfigured port).
+    A 402 or any JSON response means the A2A server is alive.
+    """
+    url = f"{axl_api}/a2a/{peer_key}"
+    try:
+        resp = std_requests.post(
+            url,
+            json={"jsonrpc": "2.0", "method": "agent/info", "id": 0, "params": {}},
+            headers={"Content-Type": "application/json"},
+            timeout=8,
+        )
+    except Exception as e:
+        return False, str(e)
+
+    raw = resp.text.strip() if resp.text else ""
+
+    # 502 = AXL forwarded to the wrong/missing port ("connection refused")
+    if resp.status_code == 502:
+        reason = raw[:120] if raw else "502 — AXL could not reach A2A backend"
+        return False, reason
+
+    # 402 = server alive, wants payment — good
+    if resp.status_code == 402:
+        return True, "alive (payment required)"
+
+    # No body on 200 — treat as alive
+    if not raw:
+        return True, "alive"
+
+    # Try JSON
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            if "_x402_challenge" in data:
+                return True, "alive (payment required)"
+            if "result" in data or "error" in data:
+                return True, "alive"
+        return True, "alive"
+    except Exception:
+        return True, "alive"
+
+
+# ── Safe JSON parse ────────────────────────────────────────────────────────
+
+def safe_json(resp) -> Optional[dict]:
+    """Parse JSON safely; print a clear message and return None on failure."""
+    raw = resp.text.strip() if resp.text else ""
+    if not raw:
+        print(c(C.RED,  f"  ✗ Empty response body (HTTP {resp.status_code})"))
+        print(c(C.DIM,   "    The AXL node could not reach the A2A backend."))
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        print(c(C.RED,  f"  ✗ Non-JSON response (HTTP {resp.status_code}):"))
+        print(c(C.DIM,  f"    {raw[:200]}"))
+        return None
 
 
 # ── Core A2A message sender ────────────────────────────────────────────────
@@ -136,8 +202,8 @@ def send_a2a_message(
     x402_http_obj,
 ) -> Optional[str]:
     """
-    Send a natural language message to an A2A agent.
-    Handles x402 payment challenge autonomously.
+    Send a natural language message to an A2A agent via AXL.
+    Handles x402 payment challenges (HTTP-header and JSON-tunneled) autonomously.
     Returns the agent's reply text, or None on failure.
     """
     _call_counter[0] += 1
@@ -170,17 +236,52 @@ def send_a2a_message(
         print(c(C.RED, f"  ✗ Request failed: {e}"))
         return None
 
-    result = resp.json()
+    # ── 502 = AXL couldn't reach A2A backend ──────────────────────────────
+    if resp.status_code == 502:
+        raw = resp.text.strip() if resp.text else "no body"
+        print(c(C.RED,    "  ✗ AXL 502 — cannot reach the A2A backend for this peer."))
+        print(c(C.DIM,   f"    {raw[:200]}"))
+        print(c(C.YELLOW, "  ℹ  This peer may be MCP-only, or its A2A server is misconfigured."))
+        return None
 
-    # ── Handle x402 payment challenge ─────────────────────────────────────
+    # ── Real HTTP 402 (payment info in response headers) ──────────────────
+    if resp.status_code == 402:
+        print(c(C.YELLOW, "  ⚡ HTTP 402 — paying automatically via x402..."))
+        raw_body = safe_json(resp) or {}
+
+        def get_hdr(name: str) -> Optional[str]:
+            return resp.headers.get(name)
+
+        try:
+            payment_required = x402_http_obj.get_payment_required_response(get_hdr, raw_body)
+            payment_payload  = x402_client_obj.create_payment_payload(payment_required)
+            payment_sig      = x402_http_obj.encode_payment_signature_header(payment_payload)
+
+            resp = std_requests.post(
+                a2a_url,
+                json={**payload, "_x402_payment": payment_sig},
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
+            print(c(C.GREEN, "  ✓ Payment settled — $0.001 USDC via x402"))
+        except Exception as e:
+            print(c(C.RED, f"  ✗ Payment failed (HTTP 402 path): {e}"))
+            return None
+
+    # ── Parse JSON body ───────────────────────────────────────────────────
+    result = safe_json(resp)
+    if result is None:
+        return None
+
+    # ── JSON-tunneled x402 challenge ──────────────────────────────────────
     if isinstance(result, dict) and "_x402_challenge" in result:
-        challenge        = result["_x402_challenge"]
+        challenge         = result["_x402_challenge"]
         challenge_headers = challenge.get("headers", {})
         challenge_body    = challenge.get("body", {})
 
-        print(c(C.YELLOW, "  ⚡ Payment required — paying automatically via x402..."))
+        print(c(C.YELLOW, "  ⚡ x402 challenge — paying automatically..."))
 
-        def get_header(name: str) -> Optional[str]:
+        def get_challenge_header(name: str) -> Optional[str]:
             for k, v in challenge_headers.items():
                 if k.lower() == name.lower():
                     return v
@@ -188,27 +289,26 @@ def send_a2a_message(
 
         try:
             payment_required = x402_http_obj.get_payment_required_response(
-                get_header, challenge_body
+                get_challenge_header, challenge_body
             )
-            payment_payload  = x402_client_obj.create_payment_payload(payment_required)
-            payment_headers  = x402_http_obj.encode_payment_signature_header(payment_payload)
-
-            retry_payload = {**payload, "_x402_payment": payment_headers}
+            payment_payload = x402_client_obj.create_payment_payload(payment_required)
+            payment_sig     = x402_http_obj.encode_payment_signature_header(payment_payload)
 
             resp2  = std_requests.post(
                 a2a_url,
-                json=retry_payload,
+                json={**payload, "_x402_payment": payment_sig},
                 headers={"Content-Type": "application/json"},
                 timeout=60,
             )
-            result = resp2.json()
+            result = safe_json(resp2)
+            if result is None:
+                return None
 
-            # Strip receipt from display (but keep for logging)
             receipt = result.pop("_x402_receipt", None) if isinstance(result, dict) else None
             tx_info = ""
             if receipt:
                 try:
-                    r = json.loads(receipt) if isinstance(receipt, str) else receipt
+                    r  = json.loads(receipt) if isinstance(receipt, str) else receipt
                     tx = r.get("transaction") or r.get("txHash", "")
                     if tx:
                         tx_info = f" (tx: {str(tx)[:12]}...)"
@@ -221,15 +321,14 @@ def send_a2a_message(
             print(c(C.RED, f"  ✗ Payment failed: {e}"))
             return None
 
-    # ── Extract reply text ─────────────────────────────────────────────────
+    # ── Extract reply ─────────────────────────────────────────────────────
     if isinstance(result, dict) and "result" in result:
         parts = result["result"].get("parts", [])
         texts = [p.get("text", "") for p in parts if p.get("kind") == "text"]
         return "\n".join(texts) if texts else "(empty reply)"
 
     elif isinstance(result, dict) and "error" in result:
-        err = result["error"]
-        print(c(C.RED, f"  ✗ Agent error: {err}"))
+        print(c(C.RED, f"  ✗ Agent error: {result['error']}"))
         return None
 
     else:
@@ -240,7 +339,6 @@ def send_a2a_message(
 # ── UI helpers ─────────────────────────────────────────────────────────────
 
 def prompt(text: str) -> str:
-    """Read user input, stripping whitespace. Raises EOFError/KeyboardInterrupt."""
     try:
         return input(text).strip()
     except (EOFError, KeyboardInterrupt):
@@ -249,46 +347,59 @@ def prompt(text: str) -> str:
 
 
 def display_servers(servers: list[dict]):
-    """Pretty-print the list of discovered A2A servers."""
+    """Pretty-print discovered A2A servers with reachability status."""
     print()
     separator("Available A2A Servers")
     print()
 
-    if not servers:
-        print(c(C.YELLOW, "  No A2A servers found in topology."))
-        print(c(C.DIM,    "  Make sure peers are connected to your AXL node."))
+    reachable   = [s for s in servers if s.get("reachable")]
+    unreachable = [s for s in servers if not s.get("reachable")]
+
+    if not reachable:
+        print(c(C.YELLOW, "  No reachable A2A servers found."))
+        if unreachable:
+            print()
+            print(c(C.DIM, "  Peers found but unreachable:"))
+            for s in unreachable:
+                print(c(C.DIM, f"    ✗ {s['key'][:24]}... — {s.get('probe_reason','?')[:80]}"))
+        print()
+        print(c(C.DIM, "  Tip: make sure peer A2A servers are running and registered with AXL."))
         print()
         return
 
-    for idx, srv in enumerate(servers, 1):
+    for idx, srv in enumerate(reachable, 1):
         key   = srv["key"]
         card  = srv.get("card")
         name  = card.get("name", "Unknown Agent") if card else "Unknown Agent"
         desc  = card.get("description", "")[:80] if card else ""
         price = ""
         if card:
-            caps  = card.get("capabilities", {})
-            pay   = caps.get("payment", {})
+            pay   = card.get("capabilities", {}).get("payment", {})
             price = pay.get("price_incoming", "")
 
         print(f"  {c(C.CYAN + C.BOLD, str(idx) + '.')}  {c(C.WHITE + C.BOLD, name)}")
-        print(f"      {c(C.DIM, 'Key:  ')} {c(C.DIM, key[:20] + '...')}")
+        print(f"      {c(C.DIM, 'Key:  ')}{c(C.DIM, key[:24] + '...')}")
         if desc:
-            print(f"      {c(C.DIM, 'Info: ')} {desc}")
+            print(f"      {c(C.DIM, 'Info: ')}{desc}")
         if price:
-            print(f"      {c(C.YELLOW, '💰 ')} {c(C.DIM, price)}")
-
+            print(f"      {c(C.YELLOW, '💰 ')}{c(C.DIM, price)}")
         if card and "skills" in card:
             for skill in card["skills"]:
-                print(f"      {c(C.GREEN, '✦ ')} {skill.get('name','')}: {skill.get('description','')[:70]}")
+                print(f"      {c(C.GREEN, '✦ ')}{skill.get('name','')}: {skill.get('description','')[:70]}")
+        print(f"      {c(C.GREEN, '● A2A reachable')}")
         print()
 
-    print(c(C.DIM, f"  Found {len(servers)} server(s)"))
+    if unreachable:
+        print(c(C.DIM, "  Not selectable (no A2A backend):"))
+        for s in unreachable:
+            print(c(C.DIM, f"    ✗ {s['key'][:24]}... — {s.get('probe_reason','unreachable')[:80]}"))
+        print()
+
+    print(c(C.DIM, f"  {len(reachable)} reachable · {len(unreachable)} unavailable"))
     print()
 
 
 def display_reply(reply: str):
-    """Format and display the agent's reply."""
     print()
     separator("Agent Reply")
     print()
@@ -302,7 +413,11 @@ def display_reply(reply: str):
 # ── Main interaction flows ─────────────────────────────────────────────────
 
 def discover_servers(axl_api: str) -> list[dict]:
-    """Fetch topology, extract peers, and try to get each peer's agent card."""
+    """
+    1. Fetch topology to get all peer public keys.
+    2. Probe each peer with a lightweight A2A ping to check reachability.
+    3. Fetch agent cards only for reachable peers.
+    """
     print(c(C.DIM, "  Querying AXL topology..."), end="", flush=True)
 
     try:
@@ -319,26 +434,40 @@ def discover_servers(axl_api: str) -> list[dict]:
 
     servers = []
     for key in peer_keys:
-        print(c(C.DIM, f"  Fetching card for {key[:16]}..."), end="", flush=True)
-        card = fetch_agent_card(axl_api, key)
-        if card:
-            print(c(C.GREEN, " ✓"))
+        short = key[:16]
+
+        print(c(C.DIM, f"  Probing {short}..."), end="", flush=True)
+        reachable, reason = probe_a2a(axl_api, key)
+
+        if reachable:
+            print(c(C.GREEN, " ✓ A2A alive"), end="")
         else:
-            print(c(C.DIM, " (no card — will still try A2A)"))
-        servers.append({"key": key, "card": card})
+            print(c(C.RED, f" ✗ {reason[:60]}"), end="")
+        print()
+
+        card = None
+        if reachable:
+            print(c(C.DIM, f"  Fetching card for {short}..."), end="", flush=True)
+            card = fetch_agent_card(axl_api, key)
+            if card:
+                print(c(C.GREEN, f" ✓ ({card.get('name', '?')})"))
+            else:
+                print(c(C.DIM, " (no card)"))
+
+        servers.append({
+            "key":          key,
+            "card":         card,
+            "reachable":    reachable,
+            "probe_reason": reason,
+        })
 
     return servers
 
 
-def chat_loop(
-    axl_api: str,
-    server: dict,
-    x402_client_obj,
-    x402_http_obj,
-):
+def chat_loop(axl_api: str, server: dict, x402_client_obj, x402_http_obj):
     """
-    Interactive prompt loop for one selected A2A server.
-    Type 'quit', 'exit', or 'back' to return to server selection.
+    Interactive prompt loop for a selected A2A server.
+    Type 'back', 'quit', or 'exit' to return to server selection.
     """
     key  = server["key"]
     card = server.get("card")
@@ -346,12 +475,12 @@ def chat_loop(
 
     print()
     print(c(C.CYAN + C.BOLD, f"  Connected to: {name}"))
-    print(c(C.DIM, f"  Key: {key[:32]}..."))
-    print(c(C.DIM,  "  Type your message and press Enter. Each message costs $0.001 USDC."))
-    print(c(C.DIM,  "  Type 'back' or 'quit' to return to server selection."))
+    print(c(C.DIM, f"  Key: {key}"))
+    print(c(C.DIM,  "  Each message costs $0.001 USDC — paid automatically."))
+    print(c(C.DIM,  "  Type 'back' to return to server selection."))
     print()
 
-    total_paid = 0
+    total_paid    = 0.0
     messages_sent = 0
 
     while True:
@@ -364,69 +493,57 @@ def chat_loop(
         if not user_input:
             continue
 
-        cmd = user_input.lower()
-        if cmd in ("back", "quit", "exit", "q", "b"):
+        if user_input.lower() in ("back", "quit", "exit", "q", "b"):
             print(c(C.YELLOW, "  Returning to server selection..."))
             break
 
         print()
-        print(c(C.DIM, f"  Sending to {name[:40]}..."))
+        print(c(C.DIM, f"  Sending to {name}..."))
 
         reply = send_a2a_message(
-            axl_api,
-            key,
-            user_input,
-            x402_client_obj,
-            x402_http_obj,
+            axl_api, key, user_input, x402_client_obj, x402_http_obj
         )
 
         if reply is not None:
             messages_sent += 1
             total_paid    += 0.001
             display_reply(reply)
-            print(c(C.DIM, f"  [Session: {messages_sent} message(s) sent, ${total_paid:.3f} USDC paid]"))
+            print(c(C.DIM, f"  [Session: {messages_sent} msg(s) · ${total_paid:.3f} USDC paid]"))
             print()
         else:
             print(c(C.RED, "  ✗ No reply received."))
             print()
 
 
-def server_selection_loop(
-    axl_api: str,
-    x402_client_obj,
-    x402_http_obj,
-):
+def server_selection_loop(axl_api: str, x402_client_obj, x402_http_obj):
     """
-    Home screen: discover servers, let user pick one, then enter chat loop.
-    After quitting chat, returns here for a new selection.
+    Home screen: discover → pick server → chat → back to home.
     """
     while True:
         print()
         print(c(C.CYAN + C.BOLD, "  ── Home ──────────────────────────────────────────────"))
         print()
-        print(c(C.DIM, "  [r] Refresh & re-discover servers"))
-        print(c(C.DIM, "  [q] Quit"))
+        print(c(C.DIM, "  [r] Refresh & re-discover   [q] Quit"))
         print()
 
-        servers = discover_servers(axl_api)
+        servers   = discover_servers(axl_api)
+        reachable = [s for s in servers if s.get("reachable")]
+
         display_servers(servers)
 
-        if not servers:
+        if not reachable:
             try:
                 action = prompt(c(C.WHITE, "  > "))
             except (EOFError, KeyboardInterrupt):
                 break
             if action.lower() in ("q", "quit", "exit"):
                 break
-            # 'r' or anything else → re-discover
             continue
 
-        # Build choice prompt
-        choices = [str(i) for i in range(1, len(servers) + 1)]
         prompt_str = (
             c(C.WHITE, "  Select a server ")
-            + c(C.DIM, f"[1-{len(servers)}]")
-            + c(C.DIM, ", [r] refresh, [q] quit")
+            + c(C.DIM, f"[1-{len(reachable)}]")
+            + c(C.DIM, " · [r] refresh · [q] quit")
             + c(C.WHITE, " → ")
         )
 
@@ -439,13 +556,13 @@ def server_selection_loop(
             break
 
         if action.lower() in ("r", "refresh", ""):
-            continue  # re-discover
+            continue
 
+        choices = [str(i) for i in range(1, len(reachable) + 1)]
         if action in choices:
-            selected = servers[int(action) - 1]
-            chat_loop(axl_api, selected, x402_client_obj, x402_http_obj)
+            chat_loop(axl_api, reachable[int(action) - 1], x402_client_obj, x402_http_obj)
         else:
-            print(c(C.YELLOW, f"  Invalid choice '{action}'. Enter a number 1-{len(servers)}, r, or q."))
+            print(c(C.YELLOW, f"  Invalid choice. Enter 1-{len(reachable)}, r, or q."))
 
 
 # ── Entry point ────────────────────────────────────────────────────────────
@@ -453,35 +570,35 @@ def server_selection_loop(
 def main():
     banner()
 
-    # ── Read config ────────────────────────────────────────────────────────
-    private_key = os.environ.get("EVM_PRIVATE_KEY") or os.environ.get("AGENT_A_EVM_PRIVATE_KEY")
-    axl_api     = os.environ.get("AXL_API", "http://127.0.0.1:9002")
+    private_key = (
+        os.environ.get("EVM_PRIVATE_KEY")
+        or os.environ.get("AGENT_A_EVM_PRIVATE_KEY")
+    )
+    axl_api = os.environ.get("AXL_API", "http://127.0.0.1:9002")
 
     if not private_key:
         print(c(C.RED, "  ✗ EVM_PRIVATE_KEY is not set."))
         print(c(C.DIM, "    export EVM_PRIVATE_KEY='0x...'"))
         sys.exit(1)
 
-    # ── Set up x402 ────────────────────────────────────────────────────────
     try:
         account, x402_client_obj, x402_http_obj = setup_x402(private_key)
     except Exception as e:
-        print(c(C.RED, f"  ✗ Failed to initialise x402 payment client: {e}"))
+        print(c(C.RED, f"  ✗ Failed to initialise x402 client: {e}"))
         sys.exit(1)
 
     print(c(C.GREEN, f"  ✓ Wallet:   {account.address}"))
     print(c(C.GREEN, f"  ✓ AXL Node: {axl_api}"))
     print(c(C.DIM,    "  x402 payments will be handled automatically."))
 
-    # ── Main loop ──────────────────────────────────────────────────────────
     try:
         server_selection_loop(axl_api, x402_client_obj, x402_http_obj)
     except KeyboardInterrupt:
         pass
 
     print()
-    print(c(C.CYAN, "  Goodbye! Total messages sent: " + str(_call_counter[0])))
-    print(c(C.DIM, f"  Total paid: ${_call_counter[0] * 0.001:.3f} USDC via x402"))
+    print(c(C.CYAN, f"  Goodbye! Messages sent: {_call_counter[0]}"))
+    print(c(C.DIM,  f"  Total paid: ${_call_counter[0] * 0.001:.3f} USDC"))
     print()
 
 
