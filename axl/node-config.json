@@ -1,7 +1,9 @@
 {
   "PrivateKeyPath": "private.pem",
   "Peers": [],
-  "Listen": ["tls://0.0.0.0:9001"],
+  "Listen": [
+    "tls://0.0.0.0:9001"
+  ],
   "api_port": 9002,
   "tcp_port": 7000,
   "router_addr": "http://127.0.0.1",

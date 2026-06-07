@@ -104,10 +104,10 @@ WALLET_ADDRESS   = os.environ["AGENT_C_WALLET_ADDRESS"]
 PRIVATE_KEY      = os.environ["AGENT_C_EVM_PRIVATE_KEY"]
 GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
 AXL_API          = os.environ.get("AGENT_C_AXL_API", "http://127.0.0.1:9022")
-A2A_PORT         = int(os.environ.get("AGENT_C_A2A_PORT", "9024"))
+A2A_PORT         = int(os.environ.get("AGENT_C_A2A_PORT", "9004"))
 EVM_NETWORK: Network = "eip155:84532"   # Base Sepolia testnet
 FACILITATOR_URL  = "https://x402.org/facilitator"
-GEMINI_MODEL     = "gemini-2.0-flash"
+GEMINI_MODEL     = "gemini-3-flash-preview"
 
 logger.info(f"Agent D wallet (receive): {WALLET_ADDRESS}")
 logger.info(f"AXL node: {AXL_API}")

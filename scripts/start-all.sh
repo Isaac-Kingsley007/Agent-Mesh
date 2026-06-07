@@ -77,7 +77,7 @@ C_AXL_API="http://127.0.0.1:9022"
 C_AXL_CONFIG="node-config-3.json"
 C_MCP_PORT=7300
 C_ROUTER_PORT=9023
-C_A2A_PORT=9024
+C_A2A_PORT=9004
 C_SERVICE_NAME="agent-c"
 
 # ── PID tracking (all background processes) ──────────────────────────────────
